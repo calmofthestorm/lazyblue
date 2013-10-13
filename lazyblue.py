@@ -151,7 +151,6 @@ class Monitor(object):
         self.unlock_screen()
         self.state = _UNLOCKED
       elif (self.state == _UNLOCKED and self.count >= config.lock_time):
-        print "ohai", time.time()
         if (self.last_locked + config.lock_cooldown <= time.time() and
             self.last_rearm + config.rearm_cooldown <= time.time()):
           self.count = 0
@@ -167,7 +166,7 @@ class Monitor(object):
         count -= 1
 
   def unlock_screen(self):
-    """execute the screen lock command"""
+    """execute the screen unlock command"""
     if (os.system(config.unlock_command % {"pid":self.lock_pid}) not in
         (signal.SIGKILL, signal.SIGTERM)):
       if config.rearm_cooldown == 0:
@@ -176,7 +175,7 @@ class Monitor(object):
         self.last_rearm = time.time()
 
   def lock_screen(self):
-    """execute the screen unlock command"""
+    """execute the screen lock command"""
     self.lock_pid = os.fork()
     if self.lock_pid == 0:
       os.system(config.lock_command)
@@ -270,7 +269,8 @@ def parse_arguments():
   parser.add_argument("-r", "--rearm_cooldown", metavar="SECONDS", type=int,
       help=("wait SECONDS to relax screen if user unlocks it manually. "
             "set to zero to exit whenever user unlock screen manually "
-            "(default).")
+            "(default). This is probably only useful if you are using "
+            "kill as the unlock command. (eg, with vlock)")
     )
 
   parser.add_argument("-i", "--poll_interval", metavar="SECONDS", type=float,
