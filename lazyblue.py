@@ -10,43 +10,19 @@ import bluetooth
 import bluetooth._bluetooth as bluez
 
 DEFAULT_OPTIONS = {
-    # lock the screen when signal strength is less than or equal to
-    # LOCK_STRENGTH for config.lock_time seconds.
     "lock_strength": -1,
     "lock_time": 6,
-
-    # unlock the screen when signal strength is equal to or greater than
-    # or equal to UNLOCK_STRENGTH for config.unlock_time seconds.
     "unlock_strength": 0,
     "unlock_time": 1,
-
-    # only lock the screen once per config.lock_cooldown seconds. this is a
-    # failsafe to prevent you from being locked out of your computer due to
-    # constant locking if there is a bug.
     "lock_cooldown": 15,
-
-    # if nonzero, wait this many seconds to re-arm after a user unlocks the
-    # screen manually raher than via Bluetooth. If 0, exit in such a situation.
     "rearm_cooldown": 0,
-
-    # how often to poll the signal strength.
     "poll_interval": 1,
-
-    # how often to attempt to connect to the device when it is connected.
     "connect_interval": 1,
-
-    # screen locking command.
     "lock_command": "",
-
-    # screen unlocking command
     "unlock_command": "",
-
-    # command to run to detect if screen is locked (for rearm cooldowns)
     "status_command": "",
-
-    # run this command every poll step user is nearby if screen is unlocked
-    # (eg, to inhibit screensaver when you're sitting there)
     "activity_command": "",
+    "verbose":False,
   }
 
 #######################################################################
@@ -162,6 +138,30 @@ class ScreenLocker(object):
        monitor and return True."""
     return not config.status_command or os.system(config.status_command)
 
+class DryRunScreenLocker(ScreenLocker):
+  """don't actually run commands, just log what would happen."""
+  def unlock_screen(self):
+    """execute the screen unlock command"""
+    self._print_event("unlock screen")
+
+  def lock_screen(self):
+    """execute the screen lock command"""
+    self._print_event("lock screen")
+
+  def simulate_activity(self):
+    """run this command every poll step user is nearby if screen is unlocked."""
+    print "simulate activity"
+
+  def is_locked(self):
+    """returns whether there is a running screenlock. When unsure, trust the
+       monitor and return True."""
+    return True
+
+  def _print_event(self, event):
+    print
+    print "*" * 80
+    print "%s\n" % event
+
 class ForegroundScreenLocker(ScreenLocker):
   """Locks the screen with a given program and sends SIGTERM to unlock."""
   def __init__(self):
@@ -228,6 +228,8 @@ class Monitor(object):
     self.screenlocker = screenlocker
     self.state = _UNLOCKED
     self.last_rearm = 0
+    self.min_strength = None
+    self.max_strength = None
 
   def poll(self):
     """poll the system once and execute any necessary actions, respecting
@@ -250,14 +252,21 @@ class Monitor(object):
   def update(self, strength):
     """perform actions based on an observation of given strength."""
     self.transition(_strength_to_state(strength))
-    print (("lock_state: %s\tbluetooth_state: %s\tchange_time: %.2f\t"
-            "last_locked: %i\tsignal_strength: %i\tmax_strength: %i\t"
-            "min_strength: %i" %
-            (self.state,
-            _strength_to_state(strength),
-            self.count,
-            self.last_locked,
-            strength, 0, 0)))
+    self.min_strength = (strength if self.min_strength is None
+                          else min(self.min_strength, strength))
+    self.max_strength = (strength if self.max_strength is None
+                          else max(self.max_strength, strength))
+    if config.verbose:
+      print (("lock_state: %s\tbluetooth_state: %s\tchange_time: %.2f\t"
+              "last_locked: %i\tsignal_strength: %i\tmax_strength: %i\t"
+              "min_strength: %i" %
+              (self.state,
+              _strength_to_state(strength),
+              self.count,
+              self.last_locked,
+              strength,
+              self.max_strength,
+              self.min_strength)))
 
   def transition(self, signal_state):
     """performs state machine transition and necessary actions."""
@@ -291,43 +300,6 @@ class Monitor(object):
       self.poll()
       if count is not None:
         count -= 1
-
-class DryMonitor(Monitor):
-  """monitor for dry runs that logs state information copiously."""
-  def __init__(self, connection):
-    self.max_strength = -255
-    self.min_strength = 0
-    Monitor.__init__(self, connection)
-
-  def unlock_screen(self):
-    print
-    print "*" * 80
-    print "unlock screen\n"
-
-  def lock_screen(self):
-    print
-    print "*" * 80
-    print "lock screen\n"
-
-  def update(self, strength):
-    Monitor.update(self, strength)
-
-    self.max_strength = (strength if self.max_strength is None
-                         else max(strength, self.max_strength))
-    self.min_strength = (strength if self.min_strength is None
-                         else min(strength, self.min_strength))
-
-    print (("lock_state: %s\tbluetooth_state: %s\tchange_time: %.2f\t"
-            "last_locked: %i\tsignal_strength: %i\tmax_strength: %i\t"
-            "min_strength: %i\trearm_count: %i" %
-            (self.state,
-             _strength_to_state(strength),
-             self.count,
-             self.last_locked,
-             strength,
-             self.max_strength,
-             self.min_strength,
-             self.last_rearm)))
 
 def parse_arguments():
   conf_parser = argparse.ArgumentParser(add_help=False)
@@ -426,7 +398,11 @@ def parse_arguments():
   parser.add_argument("-n", "--dry_run", action="store_true",
       help=("display to console signal strength and what will be "
             "done rather than actually locking screen. useful for figuring "
-            "out appropriate signal strengths.")
+            "out appropriate signal strengths. Implies verbose.")
+    )
+
+  parser.add_argument("-v", "--verbose", action="store_true",
+      help="display regular updates on signal and state."
     )
 
   config = parser.parse_args(remaining_argv)
@@ -436,6 +412,9 @@ def parse_arguments():
   if config.device_mac is None:
     sys.stderr.write("You must specify the MAC address of your device.\n")
     valid = False
+
+  if config.dry_run:
+    config.verbose = True
 
   if config.foreground_lock and (config.vlock or config.unlock_command):
     sys.stderr.write("--foreground_lock conflicts with vlock and unlock_command.\n")
@@ -487,12 +466,14 @@ def parse_arguments():
 
 if __name__ == "__main__":
   config = parse_arguments()
-  if config.vlock:
+  if config.dry_run:
+    locker = DryRunScreenLocker()
+  elif config.vlock:
     locker = VlockScreenLocker()
   elif config.foreground_lock:
     locker = ForegroundScreenLocker()
   else:
     locker = ScreenLocker()
   connection = Connection(config.device_mac, 1)
-  monitor = (DryMonitor if config.dry_run else Monitor)(connection, locker)
+  monitor = Monitor(connection, locker)
   monitor.poll_loop()

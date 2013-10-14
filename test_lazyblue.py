@@ -88,12 +88,61 @@ class test_Connection(unittest.TestCase):
     self.assertEqual(connection.get_signal_strength(), -255)
     self.assertEqual(connect_method.call_count, 1)
 
+class test_ScreenLocker(unittest.TestCase):
+  def setUp(self):
+    lazyblue.config = Config(lazyblue.DEFAULT_OPTIONS)
+    self.screenlocker = lazyblue.ScreenLocker()
+
+  @mock.patch("os.system")
+  def test_unlock_screen(self, system):
+    lazyblue.config.lock_command = "xscreensaver-command -l"
+    self.screenlocker.lock_screen()
+    system.assert_called_with(lazyblue.config.lock_command)
+
+  @mock.patch("os.system")
+  def test_lock_screen(self, system):
+    lazyblue.config.unlock_command = "xscreensaver-command -d"
+    self.screenlocker.unlock_screen()
+    system.assert_called_with(lazyblue.config.unlock_command)
+
+  @mock.patch("os.system")
+  def test_simulate_activity(self, system):
+    lazyblue.config.activity_command = "xscreensaver-command -p"
+    self.screenlocker.simulate_activity()
+    system.assert_called_with(lazyblue.config.activity_command)
+
+  @mock.patch("os.system")
+  def test_is_locked(self, system):
+    lazyblue.config.status_command = "xscreensaver-command -time"
+    system.return_value = True
+    result = self.screenlocker.is_locked()
+    system.assert_called_with(lazyblue.config.status_command)
+    self.assertEqual(result, True)
+
+    system.reset_mock()
+    lazyblue.config.status_command = ""
+    result = self.screenlocker.is_locked()
+    system.assert_not_called()
+    self.assertEqual(result, True)
+
+class test_VlockScreenLocker(unittest.TestCase):
+  def setUp(self):
+    lazyblue.config = Config(lazyblue.DEFAULT_OPTIONS)
+    self.screenlocker = lazyblue.VlockScreenLocker()
+
+  @mock.patch("os.system")
+  def test_is_locked(self, system):
+    lazyblue.config.unlock_command = "xscreensaver-command -d"
+    self.screenlocker.unlock_screen()
+    system.assert_called_with(lazyblue.config.unlock_command)
+
 class test_Monitor(unittest.TestCase):
   def setUp(self):
     lazyblue.config = Config(lazyblue.DEFAULT_OPTIONS)
     self.connection = mock.Mock(lazyblue.Connection, autospec=True)
+    self.screenlocker = mock.Mock(lazyblue.ScreenLocker, autospec=True)
     self.connection.get_signal_strength.return_value = -1
-    self.monitor = lazyblue.Monitor(self.connection)
+    self.monitor = lazyblue.Monitor(self.connection, self.screenlocker)
 
   @mock.patch("lazyblue.Monitor.update")
   @mock.patch("time.sleep")
@@ -113,6 +162,25 @@ class test_Monitor(unittest.TestCase):
     self.monitor.poll()
     sleep.assert_called_with(1.75)
 
+   # rearm quit now
+    self.monitor.state = lazyblue._LOCKED
+    self.monitor.last_rearm = 519
+    self.monitor.count = 20
+    self.screenlocker.is_locked.return_value = False 
+    lazyblue.config.rearm_cooldown = 0
+    clock.return_value = 520
+    self.assertRaises(SystemExit, self.monitor.poll)
+
+   # rearm cooldown
+    self.monitor.state = lazyblue._LOCKED
+    self.monitor.last_rearm = 529
+    self.monitor.count = 20
+    self.screenlocker.is_locked.return_value = False 
+    lazyblue.config.rearm_cooldown = 10
+    clock.return_value = 535
+    self.monitor.poll()
+    self.assertEqual(self.monitor.last_rearm, 535)
+
   @mock.patch("lazyblue.Monitor.transition")
   def test_update(self, transition):
     lazyblue.config.lock_strength = -10
@@ -125,9 +193,7 @@ class test_Monitor(unittest.TestCase):
     self.monitor.poll_loop(10)
     self.assertEqual(10, poll.call_count)
 
-  @mock.patch("lazyblue.Monitor.lock_screen")
-  @mock.patch("lazyblue.Monitor.unlock_screen")
-  def test_transition_nop(self, unlock_screen, lock_screen):
+  def test_transition_nop(self):
     lazyblue.config.lock_time = 6
     lazyblue.config.unlock_time = 1
     times = range(8)
@@ -143,12 +209,10 @@ class test_Monitor(unittest.TestCase):
             self.monitor.transition(device_state)
             self.assertEqual(self.monitor.count, 0)
             self.assertEqual(self.monitor.state, lock_state)
-    self.assertEqual(lock_screen.call_count, 0)
-    self.assertEqual(unlock_screen.call_count, 0)
+    self.assertEqual(self.screenlocker.lock_screen.call_count, 0)
+    self.assertEqual(self.screenlocker.unlock_screen.call_count, 0)
 
-  @mock.patch("lazyblue.Monitor.lock_screen")
-  @mock.patch("lazyblue.Monitor.unlock_screen")
-  def test_transition_change(self, unlock_screen, lock_screen):
+  def test_transition_change(self):
     lazyblue.config.lock_time = 6
     lazyblue.config.unlock_time = 1
     times = range(8)
@@ -162,8 +226,8 @@ class test_Monitor(unittest.TestCase):
         opposite_state = (lazyblue._HERE if starting_state == lazyblue._LOCKED
                           else lazyblue._GONE)
         for count in times:
-          lock_screen.reset_mock()
-          unlock_screen.reset_mock()
+          self.screenlocker.lock_screen.reset_mock()
+          self.screenlocker.unlock_screen.reset_mock()
           self.monitor.count = count - lazyblue.config.poll_interval
           self.monitor.state = starting_state
           self.monitor.last_locked = 0
@@ -174,20 +238,20 @@ class test_Monitor(unittest.TestCase):
             self.assertEqual(self.monitor.count, 0)
             self.assertEqual(self.monitor.state, other_state)
             if starting_state == lazyblue._LOCKED:
-              self.assertEqual(lock_screen.call_count, 0)
-              self.assertEqual(unlock_screen.call_count, 1)
+              self.assertEqual(self.screenlocker.lock_screen.call_count, 0)
+              self.assertEqual(self.screenlocker.unlock_screen.call_count, 1)
             else:
-              self.assertEqual(lock_screen.call_count, 1)
-              self.assertEqual(unlock_screen.call_count, 0)
+              self.assertEqual(self.screenlocker.lock_screen.call_count, 1)
+              self.assertEqual(self.screenlocker.unlock_screen.call_count, 0)
           else:
             self.assertEqual(self.monitor.count, count)
             self.assertEqual(self.monitor.state, starting_state)
-            self.assertEqual(lock_screen.call_count, 0)
-            self.assertEqual(unlock_screen.call_count, 0)
+            self.assertEqual(self.screenlocker.lock_screen.call_count, 0)
+            self.assertEqual(self.screenlocker.unlock_screen.call_count, 0)
 
-  @mock.patch("lazyblue.Monitor.lock_screen")
   @mock.patch("time.time")
-  def test_transition_lock_cooldown(self, clock, lock_screen):
+  @mock.patch("sys.exit")
+  def test_transition_lock_cooldown(self, sys_exit, clock):
     lazyblue.config.lock_time = 6
     lazyblue.config.unlock_time = 1
     lazyblue.config.lock_cooldown = 10
@@ -201,14 +265,14 @@ class test_Monitor(unittest.TestCase):
 
     clock.return_value = self.monitor.last_locked + 5
     self.monitor.transition(lazyblue._GONE)
-    self.assertEqual(lock_screen.call_count, 0)
+    self.assertEqual(self.screenlocker.lock_screen.call_count, 0)
 
     clock.return_value = self.monitor.last_locked + 15
     self.monitor.transition(lazyblue._GONE)
-    self.assertEqual(lock_screen.call_count, 1)
+    self.assertEqual(self.screenlocker.lock_screen.call_count, 1)
 
     # rearm cooldown
-    lock_screen.reset_mock()
+    self.screenlocker.lock_screen.reset_mock()
     self.monitor.count = 10
     self.monitor.state = lazyblue._UNLOCKED
     self.monitor.last_locked = 10000
@@ -216,24 +280,9 @@ class test_Monitor(unittest.TestCase):
 
     clock.return_value = self.monitor.last_rearm + 15
     self.monitor.transition(lazyblue._GONE)
-    self.assertEqual(lock_screen.call_count, 0)
+    self.assertEqual(self.screenlocker.lock_screen.call_count, 0)
 
     clock.return_value = self.monitor.last_rearm + 25
     self.monitor.transition(lazyblue._GONE)
-    self.assertEqual(lock_screen.call_count, 1)
-
-  @mock.patch("time.time")
-  @mock.patch("sys.exit")
-  @mock.patch("os.system")
-  def test_unlock_screen(self, system, mock_exit, clock):
-    # run command
-    lazyblue.config.unlock_command = "killall vlock"
-    system.return_value = 0
-    self.monitor.unlock_screen()
-    system.assert_called_with(lazyblue.config.unlock_command)
-
-  @mock.patch("os.fork")
-  @mock.patch("os._exit")
-  @mock.patch("os.system")
-  def test_lock_screen(self, system, mock_exit, fork):
-    pass
+    self.assertEqual(self.screenlocker.lock_screen.call_count, 1)
+    self.assertEqual(sys_exit.call_count, 0)
