@@ -1,8 +1,8 @@
 import bluetooth
-import unittest
 import mock
-import time
 import StringIO
+import time
+import unittest
 
 import lazyblue
 
@@ -226,47 +226,14 @@ class test_Monitor(unittest.TestCase):
   @mock.patch("sys.exit")
   @mock.patch("os.system")
   def test_unlock_screen(self, system, mock_exit, clock):
-    # simple case
-    lazyblue.config.rearm_cooldown = 0
-    system.return_value = lazyblue.signal.SIGKILL
-    self.monitor.unlock_screen()
-    self.assertEqual(mock_exit.call_count, 0)
-
-    # manual no rearm
+    # run command
+    lazyblue.config.unlock_command = "killall vlock"
     system.return_value = 0
     self.monitor.unlock_screen()
-    self.assertEqual(mock_exit.call_count, 1)
-
-    # manual with rearm
-    lazyblue.config.rearm_cooldown = 10
-    system.return_value = 0
-    clock.return_value = 824
-    self.monitor.unlock_screen()
-    self.assertEqual(mock_exit.call_count, 1)
-    self.assertEqual(self.monitor.last_rearm, 824)
-
-    # formatting
-    self.monitor.lock_pid = 824
-    lazyblue.config.unlock_command = "kill %(pid)s # kill %(pid)s"
-    self.monitor.unlock_screen()
-    system.assert_called_with("kill 824 # kill 824")
+    system.assert_called_with(lazyblue.config.unlock_command)
 
   @mock.patch("os.fork")
   @mock.patch("os._exit")
   @mock.patch("os.system")
   def test_lock_screen(self, system, mock_exit, fork):
-    self.lock_pid = None
-
-    # child calls and exits using low-level exit (to avoid doing wrong cleanup)
-    fork.return_value = 0 
-    self.monitor.lock_screen()
-    self.assertEqual(mock_exit.call_count, 1)
-    system.assert_called_with(lazyblue.config.lock_command)
-
-    # parent does not block
-    fork.return_value = 824
-    self.monitor.lock_screen()
-    self.assertEqual(mock_exit.call_count, 1)
-    self.assertEqual(system.call_count, 1)
-
-    self.assertEqual(self.monitor.lock_pid, 824)
+    pass
