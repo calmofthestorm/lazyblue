@@ -2,7 +2,6 @@ import argparse
 import ConfigParser
 import os
 import time
-import threading
 import signal
 import subprocess
 import sys
@@ -13,7 +12,7 @@ import bluetooth._bluetooth as bluez
 DEFAULT_OPTIONS = {
     # lock the screen when signal strength is less than or equal to
     # LOCK_STRENGTH for config.lock_time seconds.
-    "lock_strength": -2,
+    "lock_strength": -1,
     "lock_time": 6,
 
     # unlock the screen when signal strength is equal to or greater than
@@ -34,13 +33,20 @@ DEFAULT_OPTIONS = {
     "poll_interval": 1,
 
     # how often to attempt to connect to the device when it is connected.
-    "connect_interval": 15,
+    "connect_interval": 1,
 
     # screen locking command.
     "lock_command": "",
 
     # screen unlocking command
     "unlock_command": "",
+
+    # command to run to detect if screen is locked (for rearm cooldowns)
+    "status_command": "",
+
+    # run this command every poll step user is nearby if screen is unlocked
+    # (eg, to inhibit screensaver when you're sitting there)
+    "activity_command": "",
   }
 
 #######################################################################
@@ -54,6 +60,27 @@ _HERE = "here"
 _GONE = "gone"
 _NEITHER = "neither"
 
+# Terrible vlock command -- need to sudo up, run vlock, and get its PID back
+# to this process (the grandparent), but bash's echo doesn't seem to want to
+# write to stdout unbuffered. We could also use expect's unbuffered, but
+# I'd prefer to avoid another external dependency. So we have a python
+# inside a subprocess inside a subprocess.
+_VLOCK_COMMAND = """
+sudo python -u -c '
+
+import subprocess
+import sys
+lock_shell = subprocess.Popen(["vlock", "-a", "-n"],
+                              stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              env={"USER":"%s"})
+print lock_shell.pid
+sys.stdout.flush()
+lock_shell.communicate()'
+
+"""
+
 def _strength_to_state(strength):
   """convert signal strength to appropriate state constant."""
   if strength < config.lock_strength:
@@ -66,7 +93,6 @@ def _strength_to_state(strength):
 class Connection(object):
   """responsible for establishing and maintaining a connection to the bluetooth
      device."""
-
   def __init__(self, mac, channel):
     self.mac = mac
     self.channel = channel
@@ -116,70 +142,147 @@ class Connection(object):
     else:
       return -255
 
-class Monitor(object):
-  """responsible for controlling screen locking and state transitions."""
+class ScreenLocker(object):
+  """controls the actual screen locking and unlocking via user-specified
+     commands."""
+  def unlock_screen(self):
+    """execute the screen unlock command"""
+    os.system(config.unlock_command)
 
-  def __init__(self, connection):
+  def lock_screen(self):
+    """execute the screen lock command"""
+    os.system(config.lock_command)
+
+  def simulate_activity(self):
+    """run this command every poll step user is nearby if screen is unlocked."""
+    os.system(config.activity_command)
+
+  def is_locked(self):
+    """returns whether there is a running screenlock. When unsure, trust the
+       monitor and return True."""
+    return not config.status_command or os.system(config.status_command)
+
+class ForegroundScreenLocker(ScreenLocker):
+  """Locks the screen with a given program and sends SIGTERM to unlock."""
+  def __init__(self):
+    self.lock_shell = None
+
+  def unlock_screen(self):
+    """execute the screen unlock command"""
+    self.lock_shell.terminate()
+    self.lock_shell = None
+
+  def lock_screen(self):
+    """execute the screen lock command"""
+    self.lock_shell = subprocess.Popen(
+        config.lock_command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+      )
+
+  def is_locked(self):
+    """returns whether there is a running screenlock."""
+    if self.lock_shell is None:
+      return False
+    else:
+      self.lock_shell.poll()
+      if self.lock_shell.returncode is None:
+        return True
+      else:
+        self.lock_shell = None
+        return False
+
+class VlockScreenLocker(ForegroundScreenLocker):
+  """uses vlock to lock and unlock the screen."""
+  def __init__(self):
+    self.lock_shell = None
+    self.lock_pid = None
+
+  def unlock_screen(self):
+    """execute the screen unlock command"""
+    os.system("sudo kill %i" % self.lock_pid)
+    self.lock_shell = None
+    ScreenLocker.unlock_screen(self)
+
+  def lock_screen(self):
+    """execute the screen lock command"""
+    self.lock_shell = subprocess.Popen(
+        _VLOCK_COMMAND % os.getlogin(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=True,
+      )
+    self.lock_pid = int(self.lock_shell.stdout.readline())
+    ScreenLocker.lock_screen(self)
+
+class Monitor(object):
+  """responsible for controlling bluetooth polling, state transitions and
+     coordinating locking."""
+  def __init__(self, connection, screenlocker):
     self.connection = connection
     self.last_poll = 0
-    self.state = _UNLOCKED
     self.count = 0
     self.last_locked = 0
+    self.screenlocker = screenlocker
+    self.state = _UNLOCKED
     self.last_rearm = 0
-    self.lock_shell = None
-    self.lock = threading.RLock()
 
   def poll(self):
     """poll the system once and execute any necessary actions, respecting
        config.poll_interval by sleeping until it is time for the next poll."""
-    with self.lock:
-      delta = time.time() - self.last_poll
-      if delta < config.poll_interval:
-        self.lock.release()
-        time.sleep(config.poll_interval - delta)
-        self.lock.acquire()
-      self.last_poll = time.time()
-      self.update(self.connection.get_signal_strength())
+    delta = time.time() - self.last_poll
+    if delta < config.poll_interval:
+      time.sleep(config.poll_interval - delta)
+    self.last_poll = time.time()
+
+    # Has user manually unlocked?
+    if self.state == _LOCKED and not self.screenlocker.is_locked():
+      if config.rearm_cooldown == 0:
+        sys.exit()
+      else:
+        self.state = _UNLOCKED
+        self.last_rearm = time.time()
+
+    self.update(self.connection.get_signal_strength())
 
   def update(self, strength):
     """perform actions based on an observation of given strength."""
-    with self.lock:
-      self.transition(_strength_to_state(strength))
-      print (("lock_state: %s\tbluetooth_state: %s\tchange_time: %.2f\t"
-              "last_locked: %i\tsignal_strength: %i\tmax_strength: %i\t"
-              "min_strength: %i\trearm_count: %i" %
-              (self.state,
-              _strength_to_state(strength),
-              self.count,
-              self.last_locked,
-              strength, 0, 0,
-              self.last_rearm)))
+    self.transition(_strength_to_state(strength))
+    print (("lock_state: %s\tbluetooth_state: %s\tchange_time: %.2f\t"
+            "last_locked: %i\tsignal_strength: %i\tmax_strength: %i\t"
+            "min_strength: %i" %
+            (self.state,
+            _strength_to_state(strength),
+            self.count,
+            self.last_locked,
+            strength, 0, 0)))
 
   def transition(self, signal_state):
     """performs state machine transition and necessary actions."""
-    with self.lock:
-      if signal_state is _NEITHER:
-        # Signal not either way.
-        self.count = 0
-      elif ((self.state == _UNLOCKED and signal_state == _HERE) or
-          (self.state == _LOCKED and signal_state == _GONE)):
-        # Stay in same state.
-        self.count = 0
-      else:
-        # Consider changing lock state.
-        self.count += config.poll_interval
+    if signal_state is _NEITHER:
+      # Signal not either way.
+      self.count = 0
+    elif ((self.state == _UNLOCKED and signal_state == _HERE) or
+        (self.state == _LOCKED and signal_state == _GONE)):
+      # Stay in same state.
+      self.count = 0
+    else:
+      # Consider changing lock state.
+      self.count += config.poll_interval
 
-        if self.state == _LOCKED and self.count >= config.unlock_time:
+      if self.state == _LOCKED and self.count >= config.unlock_time:
+        self.count = 0
+        self.screenlocker.unlock_screen()
+        self.state = _UNLOCKED
+      elif (self.state == _UNLOCKED and self.count >= config.lock_time):
+        if (self.last_locked + config.lock_cooldown <= time.time() and
+            self.last_rearm + config.rearm_cooldown <= time.time()):
+          self.screenlocker.lock_screen()
+          self.state = _LOCKED
           self.count = 0
-          self.unlock_screen()
-          self.state = _UNLOCKED
-        elif (self.state == _UNLOCKED and self.count >= config.lock_time):
-          if (self.last_locked + config.lock_cooldown <= time.time() and
-              self.last_rearm + config.rearm_cooldown <= time.time()):
-            self.state = _LOCKED
-            self.lock_screen()
-            self.count = 0
-            self.last_locked = time.time()
+          self.last_locked = time.time()
 
   def poll_loop(self, count=None):
     """poll repeatedly the specified number of times, or forever if
@@ -188,52 +291,6 @@ class Monitor(object):
       self.poll()
       if count is not None:
         count -= 1
-
-  def unlock_screen(self):
-    """execute the screen unlock command"""
-    if config.unlock_command:
-      os.system(config.unlock_command)
-    else:
-      self.system("kill %i" % self.lock_pid)
-      self.lock_shell.terminate()
-      self.state = _UNLOCKED
-
-  def lock_screen(self):
-    """execute the screen lock command"""
-    threading.Thread(target=self.lock_main).start()
-
-  def lock_main(self):
-    if not config.lock_command:
-      opts = {
-          "env":{"USER":os.getlogin()},
-        }
-      executable = "sudo bash"
-    else:
-      opts = {}
-      executable = config.lock_command
-
-    self.lock_shell = subprocess.Popen(
-        executable,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=True,
-        **opts
-      )
-
-    self.lock_pid = int(self.lock_shell.communicate("export USER=\"%s\"\nvlock -a -n &\necho $!" % os.getlogin())[0])
-    with self.lock:
-      if self.lock_shell.returncode not in (signal.SIGKILL, signal.SIGTERM):
-        # Process died by manual user logout OR is non-blocking.
-        if not config.unlock_command:
-          # If no unlock_command, process should have been killed.
-          # Need to rearm.
-          if config.rearm_cooldown == 0:
-            sys.exit()
-          else:
-            self.last_rearm = time.time()
-            self.count = 0
-            self.state = _UNLOCKED
 
 class DryMonitor(Monitor):
   """monitor for dry runs that logs state information copiously."""
@@ -341,6 +398,31 @@ def parse_arguments():
       help="command to run to unlock the screen"
     )
 
+  parser.add_argument("--activity_command", metavar="CMD",
+      help=("command to run whenever screen is locked and device detected (eg, "
+            "to inhibit screensaver).")
+    )
+
+  parser.add_argument("--status_command", metavar="CMD",
+      help=("command to run to determine whether screensaver is active (return "
+            "0 for unlocked, anything else if locked. Required for rearm to "
+            " work. May not be combined with --vlock.")
+    )
+
+  parser.add_argument("--foreground_lock", action="store_true",
+      help=("run the lock command and kill it to unlock rather than running "
+            "a command to unlock (eg xtrlock). May not use with --vlock or "
+            "--unlock_command.")
+    )
+
+  parser.add_argument("--vlock", action="store_true",
+      help=("use vlock -a -n to lock screen. Useful if you want bluetooth "
+            "locking as an independent process to your regular screen lock. "
+            "May not combine with --status_command. Implied if none of "
+            " --activity_command, --status_command, lock_command, "
+            "unlock_command is given.")
+    )
+
   parser.add_argument("-n", "--dry_run", action="store_true",
       help=("display to console signal strength and what will be "
             "done rather than actually locking screen. useful for figuring "
@@ -353,6 +435,18 @@ def parse_arguments():
   valid = True
   if config.device_mac is None:
     sys.stderr.write("You must specify the MAC address of your device.\n")
+    valid = False
+
+  if config.foreground_lock and (config.vlock or config.unlock_command):
+    sys.stderr.write("--foreground_lock conflicts with vlock and unlock_command.\n")
+    valid = False
+
+  if (not (config.activity_command or config.status_command or config.lock_command or
+      config.unlock_command)):
+    config.vlock = True
+
+  if config.vlock and config.status_command:
+    sys.stderr.write("May not use both --vlock and --status_command.\n")
     valid = False
 
   for arg in ("lock_time", "unlock_time", "lock_cooldown",
@@ -393,5 +487,12 @@ def parse_arguments():
 
 if __name__ == "__main__":
   config = parse_arguments()
-  monitor = (DryMonitor if config.dry_run else Monitor)
-  monitor(Connection(config.device_mac, 1)).poll_loop()
+  if config.vlock:
+    locker = VlockScreenLocker()
+  elif config.foreground_lock:
+    locker = ForegroundScreenLocker()
+  else:
+    locker = ScreenLocker()
+  connection = Connection(config.device_mac, 1)
+  monitor = (DryMonitor if config.dry_run else Monitor)(connection, locker)
+  monitor.poll_loop()
