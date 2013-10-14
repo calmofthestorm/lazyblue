@@ -203,7 +203,7 @@ class VlockScreenLocker(ForegroundScreenLocker):
     """execute the screen unlock command"""
     os.system("sudo kill %i" % self.lock_pid)
     self.lock_shell = None
-    ScreenLocker.unlock_screen(self)
+    ForegroundScreenLocker.unlock_screen(self)
 
   def lock_screen(self):
     """execute the screen lock command"""
@@ -215,7 +215,7 @@ class VlockScreenLocker(ForegroundScreenLocker):
         shell=True,
       )
     self.lock_pid = int(self.lock_shell.stdout.readline())
-    ScreenLocker.lock_screen(self)
+    ForegroundScreenLocker.lock_screen(self)
 
 class Monitor(object):
   """responsible for controlling bluetooth polling, state transitions and
@@ -392,7 +392,7 @@ def parse_arguments():
             "locking as an independent process to your regular screen lock. "
             "May not combine with --status_command. Implied if none of "
             " --activity_command, --status_command, lock_command, "
-            "unlock_command is given.")
+            "unlock_command is given. Relies on passwordless sudo.")
     )
 
   parser.add_argument("-n", "--dry_run", action="store_true",

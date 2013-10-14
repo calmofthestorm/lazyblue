@@ -125,16 +125,39 @@ class test_ScreenLocker(unittest.TestCase):
     system.assert_not_called()
     self.assertEqual(result, True)
 
-class test_VlockScreenLocker(unittest.TestCase):
+class test_ForgroundScreenLocker(unittest.TestCase):
   def setUp(self):
     lazyblue.config = Config(lazyblue.DEFAULT_OPTIONS)
-    self.screenlocker = lazyblue.VlockScreenLocker()
+    self.screenlocker = lazyblue.ForegroundScreenLocker()
+    self.screenlocker.lock_shell = mock.Mock(lazyblue.subprocess.Popen, autospec=True)
 
   @mock.patch("os.system")
-  def test_is_locked(self, system):
-    lazyblue.config.unlock_command = "xscreensaver-command -d"
+  def test_unlock_screen(self, system):
+    terminate = self.screenlocker.lock_shell.terminate
     self.screenlocker.unlock_screen()
-    system.assert_called_with(lazyblue.config.unlock_command)
+    self.assertIsNone(self.screenlocker.lock_shell)
+    terminate.assert_called()
+
+  @mock.patch("os.system")
+  def test_lock_screen(self, system):
+    terminate = self.screenlocker.lock_shell.terminate
+    self.screenlocker.unlock_screen()
+    self.assertIsNone(self.screenlocker.lock_shell)
+    terminate.assert_called()
+
+  def test_is_locked(self):
+    self.screenlocker.lock_shell.returncode = None
+    self.assertEqual(self.screenlocker.is_locked(), True)
+    self.screenlocker.lock_shell.poll.assert_called()
+
+    self.screenlocker.lock_shell.returncode = 0
+    poll = self.screenlocker.lock_shell.poll
+    self.assertEqual(self.screenlocker.is_locked(), False)
+    poll.assert_called()
+    self.assertEqual(self.screenlocker.lock_shell, None)
+
+    self.screenlocker.lock_shell = None
+    self.assertEqual(self.screenlocker.is_locked(), False)
 
 class test_Monitor(unittest.TestCase):
   def setUp(self):
