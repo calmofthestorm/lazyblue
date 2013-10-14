@@ -194,8 +194,8 @@ class Monitor(object):
     if config.unlock_command:
       os.system(config.unlock_command)
     else:
+      self.system("kill %i" % self.lock_pid)
       self.lock_shell.terminate()
-      os.system("sudo killall vlock-main")
       self.state = _UNLOCKED
 
   def lock_screen(self):
@@ -207,7 +207,7 @@ class Monitor(object):
       opts = {
           "env":{"USER":os.getlogin()},
         }
-      executable = "sudo vlock -a -n"
+      executable = "sudo bash"
     else:
       opts = {}
       executable = config.lock_command
@@ -221,7 +221,7 @@ class Monitor(object):
         **opts
       )
 
-    self.lock_shell.communicate("")
+    self.lock_pid = int(self.lock_shell.communicate("export USER=\"%s\"\nvlock -a -n &\necho $!" % os.getlogin())[0])
     with self.lock:
       if self.lock_shell.returncode not in (signal.SIGKILL, signal.SIGTERM):
         # Process died by manual user logout OR is non-blocking.
