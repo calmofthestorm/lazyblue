@@ -309,3 +309,46 @@ class test_Monitor(unittest.TestCase):
     self.monitor.transition(lazyblue._GONE)
     self.assertEqual(self.screenlocker.lock_screen.call_count, 1)
     self.assertEqual(sys_exit.call_count, 0)
+
+  @mock.patch("lazyblue.Monitor.transition")
+  @mock.patch("time.time")
+  def test_harden_lock(self, clock, transition):
+    lazyblue.config.harden_time = 5
+    self.monitor.count = 0
+    self.monitor.last_locked = 1024
+    self.monitor.state = lazyblue._LOCKED
+    self.monitor.vlock = mock.Mock(lazyblue.VlockScreenLocker, autospec=True)
+
+    clock.return_value = 1027
+    self.monitor.update(-255)
+    self.monitor.vlock.lock_screen.assert_not_called()
+    transition.assert_called_with(lazyblue._GONE)
+
+    clock.return_value = 1050
+    self.monitor.update(-255)
+    self.monitor.vlock.lock_screen.assert_called()
+    transition.assert_called_with(lazyblue._GONE)
+
+  @mock.patch("time.time")
+  def test_harden_unlock(self, clock):
+    lazyblue.config.harden_time = 5
+    self.monitor.last_rearm = 0
+    self.monitor.count = 1
+    self.monitor.state = lazyblue._HARDENED
+    clock.return_value = 1024
+
+    self.monitor.vlock = mock.Mock(lazyblue.VlockScreenLocker, autospec=True)
+    self.monitor.vlock.is_locked.return_value = True
+    self.monitor.update(-255)
+    self.assertEqual(self.monitor.last_rearm, 0)
+    self.assertEqual(self.monitor.count, 1)
+    self.assertEqual(self.monitor.state, lazyblue._HARDENED)
+    self.monitor.vlock.unlock_screen.assert_not_called()
+
+    self.monitor.vlock = mock.Mock(lazyblue.VlockScreenLocker, autospec=True)
+    self.monitor.vlock.is_locked.return_value = False
+    self.monitor.update(-255)
+    self.assertEqual(self.monitor.last_rearm, 1024)
+    self.assertEqual(self.monitor.count, 0)
+    self.assertEqual(self.monitor.state, lazyblue._UNLOCKED)
+    self.monitor.vlock.unlock_screen.assert_called()

@@ -22,6 +22,7 @@ DEFAULT_OPTIONS = {
     "unlock_command": "",
     "status_command": "",
     "activity_command": "",
+    "harden_time":None,
     "verbose":False,
   }
 
@@ -30,6 +31,7 @@ DEFAULT_OPTIONS = {
 # Screen states for state machine
 _LOCKED = "locked"
 _UNLOCKED = "unlocked"
+_HARDENED = "hardened"
 
 # Device states for state machine
 _HERE = "here"
@@ -53,7 +55,7 @@ lock_shell = subprocess.Popen(["vlock", "-a", "-n"],
                               env={"USER":"%s"})
 print lock_shell.pid
 sys.stdout.flush()
-lock_shell.communicate()'
+lock_shell.wait()'
 
 """
 
@@ -217,6 +219,11 @@ class VlockScreenLocker(ForegroundScreenLocker):
     self.lock_pid = int(self.lock_shell.stdout.readline())
     ForegroundScreenLocker.lock_screen(self)
 
+  def is_locked(self):
+    # Major kludge given pids can be reused and dependency on vlock
+    # implementation details. See if we can improve this later.
+    return "vlock-main" in os.popen("ps %i" % self.lock_pid, "r").read()
+
 class Monitor(object):
   """responsible for controlling bluetooth polling, state transitions and
      coordinating locking."""
@@ -226,6 +233,7 @@ class Monitor(object):
     self.count = 0
     self.last_locked = 0
     self.screenlocker = screenlocker
+    self.vlock = VlockScreenLocker()
     self.state = _UNLOCKED
     self.last_rearm = 0
     self.min_strength = None
@@ -256,6 +264,11 @@ class Monitor(object):
                           else min(self.min_strength, strength))
     self.max_strength = (strength if self.max_strength is None
                           else max(self.max_strength, strength))
+    if (config.harden_time is not None and self.state == _LOCKED and
+        time.time() - self.last_locked >= config.harden_time):
+      self.vlock.lock_screen()
+      self.state = _HARDENED
+
     if config.verbose:
       print (("lock_state: %s\tbluetooth_state: %s\tchange_time: %.2f\t"
               "last_locked: %i\tsignal_strength: %i\tmax_strength: %i\t"
@@ -273,6 +286,13 @@ class Monitor(object):
     if signal_state is _NEITHER:
       # Signal not either way.
       self.count = 0
+    elif self.state == _HARDENED:
+      # Don't do anything until unlocked manually
+      if not self.vlock.is_locked():
+        self.screenlocker.unlock_screen()
+        self.last_rearm = time.time()
+        self.state = _UNLOCKED
+        self.count = 0
     elif ((self.state == _UNLOCKED and signal_state == _HERE) or
         (self.state == _LOCKED and signal_state == _GONE)):
       # Stay in same state.
@@ -405,6 +425,19 @@ def parse_arguments():
       help="display regular updates on signal and state."
     )
 
+  parser.add_argument("-d", "--daemon", action="store_true",
+      help="daemonize (detach from terminal and run in background)."
+    )
+
+  parser.add_argument("-H", "--harden_time", metavar="SECONDS",
+      help=("lock screen with vlock after screen has been locked "
+            "for harden_time SECONDS.")
+    )
+
+  parser.add_argument("--harden_unlock", action="store_true",
+      help="unlock regular lock after engaging hardened lock."
+    )
+
   config = parser.parse_args(remaining_argv)
 
   # Validate arguments
@@ -429,7 +462,7 @@ def parse_arguments():
     valid = False
 
   for arg in ("lock_time", "unlock_time", "lock_cooldown",
-              "rearm_cooldown", "connect_interval"):
+              "rearm_cooldown", "connect_interval", "harden_time"):
     value = getattr(config, arg)
     try:
       setattr(config, arg, int(value))
@@ -476,4 +509,25 @@ if __name__ == "__main__":
     locker = ScreenLocker()
   connection = Connection(config.device_mac, 1)
   monitor = Monitor(connection, locker)
+
+  if config.daemon:
+    if os.fork() == 0:
+      os.setsid()
+      if os.fork() == 0:
+        os.chdir("/")
+        os.umask(0)
+        # Safe upper bound on number of fds we could possibly have opened.
+        for fd in range(64):
+          try:
+            os.close(fd)
+          except OSError:
+            pass
+        os.open(os.devnull, os.O_RDWR)
+        os.dup2(0, 1)
+        os.dup2(0, 2)
+      else:
+        os._exit(0)
+    else:
+      os._exit(0)
+
   monitor.poll_loop()
