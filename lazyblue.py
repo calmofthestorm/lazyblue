@@ -22,8 +22,6 @@ DEFAULT_OPTIONS = {
     "unlock_command": "",
     "status_command": "",
     "activity_command": "",
-    "harden_time":None,
-    "verbose":False,
   }
 
 #######################################################################
@@ -289,10 +287,9 @@ class Monitor(object):
     elif self.state == _HARDENED:
       # Don't do anything until unlocked manually
       if not self.vlock.is_locked():
-        self.screenlocker.unlock_screen()
         self.last_rearm = time.time()
+        self.screenlocker.unlock_screen()
         self.state = _UNLOCKED
-        self.count = 0
     elif ((self.state == _UNLOCKED and signal_state == _HERE) or
         (self.state == _LOCKED and signal_state == _GONE)):
       # Stay in same state.
@@ -331,7 +328,8 @@ def parse_arguments():
   if args.conf_file:
     config = ConfigParser.SafeConfigParser()
     config.read([args.conf_file])
-    defaults.update(config.items("Defaults"))
+    for (key, value) in config.items("Defaults"):
+      defaults[key] = {"True":True, "False":False, "None":None}.get(value, value)
 
   parser = argparse.ArgumentParser(
       parents=[conf_parser],
@@ -434,8 +432,8 @@ def parse_arguments():
             "for harden_time SECONDS.")
     )
 
-  parser.add_argument("--harden_unlock", action="store_true",
-      help="unlock regular lock after engaging hardened lock."
+  parser.add_argument("--write_config", metavar="FILE",
+      help="write current configuration to FILE and exit."
     )
 
   config = parser.parse_args(remaining_argv)
@@ -461,8 +459,11 @@ def parse_arguments():
     sys.stderr.write("May not use both --vlock and --status_command.\n")
     valid = False
 
+  if config.harden_time is not None:
+    config.harden_time = int(config.harden_time)
+
   for arg in ("lock_time", "unlock_time", "lock_cooldown",
-              "rearm_cooldown", "connect_interval", "harden_time"):
+              "rearm_cooldown", "connect_interval"):
     value = getattr(config, arg)
     try:
       setattr(config, arg, int(value))
@@ -499,35 +500,45 @@ def parse_arguments():
 
 if __name__ == "__main__":
   config = parse_arguments()
-  if config.dry_run:
-    locker = DryRunScreenLocker()
-  elif config.vlock:
-    locker = VlockScreenLocker()
-  elif config.foreground_lock:
-    locker = ForegroundScreenLocker()
-  else:
-    locker = ScreenLocker()
-  connection = Connection(config.device_mac, 1)
-  monitor = Monitor(connection, locker)
 
-  if config.daemon:
-    if os.fork() == 0:
-      os.setsid()
+  if config.write_config:
+    out = ConfigParser.SafeConfigParser()
+    out.add_section("Defaults")
+    for (key, value) in config._get_kwargs():
+      if key not in ("write_config", "conf_file") and value is not None:
+        out.set("Defaults", key, str(value))
+    with open(config.write_config, "w") as fd:
+      out.write(fd)
+  else:
+    if config.dry_run:
+      locker = DryRunScreenLocker()
+    elif config.vlock:
+      locker = VlockScreenLocker()
+    elif config.foreground_lock:
+      locker = ForegroundScreenLocker()
+    else:
+      locker = ScreenLocker()
+    connection = Connection(config.device_mac, 1)
+    monitor = Monitor(connection, locker)
+
+    if config.daemon:
       if os.fork() == 0:
-        os.chdir("/")
-        os.umask(0)
-        # Safe upper bound on number of fds we could possibly have opened.
-        for fd in range(64):
-          try:
-            os.close(fd)
-          except OSError:
-            pass
-        os.open(os.devnull, os.O_RDWR)
-        os.dup2(0, 1)
-        os.dup2(0, 2)
+        os.setsid()
+        if os.fork() == 0:
+          os.chdir("/")
+          os.umask(0)
+          # Safe upper bound on number of fds we could possibly have opened.
+          for fd in range(64):
+            try:
+              os.close(fd)
+            except OSError:
+              pass
+          os.open(os.devnull, os.O_RDWR)
+          os.dup2(0, 1)
+          os.dup2(0, 2)
+        else:
+          os._exit(0)
       else:
         os._exit(0)
-    else:
-      os._exit(0)
 
-  monitor.poll_loop()
+    monitor.poll_loop()

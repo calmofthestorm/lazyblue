@@ -8,7 +8,7 @@ import lazyblue
 
 class Config(dict):
   def __getattr__(self, key):
-    return self[key]
+    return self.get(key, None)
 
 class test_helpers(unittest.TestCase):
   def setUp(self):
