@@ -12,7 +12,7 @@ Usage
 -------
 
 - Pair the blue tooth device you wish to use with your computer (e.g, using bluetooth-wizard).
-- Run lazy blue and verbose dry run mode to choose the signal strength at which you wish to lock and unlock::
+- Run lazyblue in verbose dry run mode to choose the signal strength at which you wish to lock and unlock::
 
       python lazyblue.py -m YOUR_DEVICE_MAC -n -v
 
@@ -24,7 +24,7 @@ Specify the lock command and unlock command you wish to use with -E and -e. Take
 
 If your lock program is one that runs in the foreground (such as xtrlock), specify the Option --foreground_lock and omit the unlock command. This will cause lazyblue to simply kill the screen lock instead of running an unlock command.
 
-By default, if you unlock the screen by typing your password instead of via Bluetooth proximity, lazyblue will exit (this is to keep you from being locked out of your system should you lose the Bluetooth device, run out of battery, etc.) You may set --rearm_cooldown to a number of seconds to instead refused to real lock the screen for that many seconds.
+By default, if you unlock the screen by typing your password instead of via Bluetooth proximity, lazyblue will exit (this is to keep you from being locked out of your system should you lose the Bluetooth device, run out of battery, etc.) You may set --rearm_cooldown to a number of seconds to instead wait that many seconds before re-enabling locking.
 
 If you wish to run as a daemon, specify -d or --daemon.
 
